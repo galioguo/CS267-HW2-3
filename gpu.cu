@@ -14,6 +14,7 @@ int blks;
 int grid_size, num_bins;
 double cell_size;
 int *d_bin_count, *d_bin_ids, *d_part_ids;
+int counter; 
 
 __device__ void apply_force_gpu(particle_t& particle, particle_t& neighbor) {
     double dx = neighbor.x - particle.x;
@@ -29,10 +30,13 @@ __device__ void apply_force_gpu(particle_t& particle, particle_t& neighbor) {
     //  very simple short-range repulsive force
     //
     double coef = (1 - cutoff / r) / r2 / mass;
-    particle.ax += coef * dx;
-    particle.ay += coef * dy;
+    //particle.ax += coef * dx;
+    //particle.ay += coef * dy;
+    atomicAdd(&(particle.ax), coef * dx);
+    atomicAdd(&(particle.ay), coef * dy);
 }
 
+/*
 __global__ void compute_forces_gpu(particle_t* particles, int num_parts) {
     // Get thread (particle) ID
     int tid = threadIdx.x + blockIdx.x * blockDim.x;
@@ -43,6 +47,7 @@ __global__ void compute_forces_gpu(particle_t* particles, int num_parts) {
     for (int j = 0; j < num_parts; j++)
         apply_force_gpu(particles[tid], particles[j]);
 }
+*/
 
 __global__ void move_gpu(particle_t* particles, int num_parts, double size) {
 
@@ -90,9 +95,13 @@ void init_simulation(particle_t* parts, int num_parts, double size) {
     cudaMalloc((void**)&d_bin_count, num_bins * sizeof(int));
     cudaMalloc((void**)&d_bin_ids, num_bins * sizeof(int));
     cudaMalloc((void**)&d_part_ids, num_parts * sizeof(int));
+
+    counter = 0; 
+
+    std::cout << "Grid Size: " << grid_size << "\n";
 }
 
-// CUDA, zero accelerations
+// CUDA zero accelerations
 __global__ void zero_accelerations(particle_t* parts, int num_parts) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < num_parts) {
@@ -101,7 +110,7 @@ __global__ void zero_accelerations(particle_t* parts, int num_parts) {
     }
 }
 
-// CUDA, compute bin counts
+// CUDA compute bin counts
 __global__ void compute_bin_counts(particle_t* parts, int* bin_count, int num_parts, float cell_size, int grid_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < num_parts) {
@@ -111,7 +120,7 @@ __global__ void compute_bin_counts(particle_t* parts, int* bin_count, int num_pa
     }
 }
 
-// CUDA, bin particles
+// CUDA bin particles
 __global__ void bin_particles(particle_t* parts, int* bin_count, int* bin_ids, int* part_ids, int num_parts, float cell_size, int grid_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < num_parts) {
@@ -123,6 +132,212 @@ __global__ void bin_particles(particle_t* parts, int* bin_count, int* bin_ids, i
         part_ids[bin_ids[bin_idx] + pos] = idx;  // Store particle ID at correct position
     }
 }
+/*
+__global__ void compute_interiors_gpu(particle_t* parts, int* bin_count, int* bin_ids, int* part_ids, int grid_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= grid_size * grid_size) return;
+
+    int cell_row = idx / grid_size;
+    int cell_col = idx % grid_size;
+    int self_cell = cell_row * grid_size + cell_col;
+
+    // Ensure thread is within interior bins
+    if (cell_row > 0 && cell_row < grid_size - 1 && cell_col > 0 && cell_col < grid_size - 1) {
+        for (int self_i = 0; self_i < bin_count[self_cell]; ++self_i) {
+            int self_index = part_ids[self_i + bin_ids[self_cell]];
+            particle_t& self_particle = parts[self_index];
+
+            for (int di = -1; di <= 1; ++di) {
+                for (int dj = -1; dj <= 1; ++dj) {
+                    int neig_row = cell_row + di;
+                    int neig_col = cell_col + dj;
+                    if (neig_row >= 0 && neig_row < grid_size && neig_col >= 0 && neig_col < grid_size) {
+                        int neig_cell = neig_row * grid_size + neig_col;
+                        for (int neig_i = 0; neig_i < bin_count[neig_cell]; ++neig_i) {
+                            int neig_index = part_ids[neig_i + bin_ids[neig_cell]];
+                            particle_t& neig_particle = parts[neig_index];
+
+                            // Use atomic operations to prevent race conditions
+                            apply_force_gpu(self_particle, neig_particle);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+*/
+// CUDA compute interior bins
+
+__global__ void compute_interiors_gpu(particle_t* parts, int* bin_count, int* bin_ids, int* part_ids, int grid_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < grid_size * grid_size) {
+    int cell_row = idx / grid_size;
+    int cell_col = idx % grid_size;
+    int self_cell = cell_row * grid_size + cell_col;
+    if ( (cell_row > 0) && (cell_row < grid_size - 1) && (cell_col > 0) && (cell_col < grid_size - 1) ) {
+        for (int self_i = 0; self_i < bin_count[self_cell]; ++self_i) {
+            for (int di = -1; di <= 1; ++di) {
+                for (int dj = -1; dj <= 1; ++dj) {
+                    int neig_cell = (cell_row + di) * grid_size + (cell_col + dj); 
+                    for (int neig_i = 0; neig_i < bin_count[neig_cell]; ++neig_i) {
+                        apply_force_gpu(parts[part_ids[self_i + bin_ids[self_cell]]], parts[part_ids[neig_i + bin_ids[neig_cell]]]);
+                    }
+                }
+            }
+        }
+    }
+    }
+}
+
+// CUDA compute left bins
+__global__ void compute_left_edge_gpu(particle_t* parts, int* bin_count, int* bin_ids, int* part_ids, int grid_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int cell_row = idx;
+    int cell_col = 0;
+    int self_cell = cell_row * grid_size + cell_col;
+    if ( (idx > 0) && (idx < grid_size - 1) ) {
+        for (int self_i = 0; self_i < bin_count[self_cell]; ++self_i) {
+            for (int di = -1; di <= 1; ++di) {
+                for (int dj = 0; dj <= 1; ++dj) {
+                    int neig_cell = (cell_row + di) * grid_size + (cell_col + dj); 
+                    for (int neig_i = 0; neig_i < bin_count[neig_cell]; ++neig_i) {
+                        apply_force_gpu(parts[part_ids[self_i + bin_ids[self_cell]]], parts[part_ids[neig_i + bin_ids[neig_cell]]]);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// CUDA compute right bins
+__global__ void compute_right_edge_gpu(particle_t* parts, int* bin_count, int* bin_ids, int* part_ids, int grid_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int cell_row = idx;
+    int cell_col = grid_size - 1;
+    int self_cell = cell_row * grid_size + cell_col;
+    if ( (idx > 0) && (idx < grid_size - 1) ) {
+        for (int self_i = 0; self_i < bin_count[self_cell]; ++self_i) {
+            for (int di = -1; di <= 1; ++di) {
+                for (int dj = -1; dj <= 0; ++dj) {
+                    int neig_cell = (cell_row + di) * grid_size + (cell_col + dj); 
+                    for (int neig_i = 0; neig_i < bin_count[neig_cell]; ++neig_i) {
+                        apply_force_gpu(parts[part_ids[self_i + bin_ids[self_cell]]], parts[part_ids[neig_i + bin_ids[neig_cell]]]);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// CUDA compute top bins
+__global__ void compute_top_edge_gpu(particle_t* parts, int* bin_count, int* bin_ids, int* part_ids, int grid_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int cell_row = grid_size - 1;
+    int cell_col = idx;
+    int self_cell = cell_row * grid_size + cell_col;
+    if ( (idx > 0) && (idx < grid_size - 1) ) {
+        for (int self_i = 0; self_i < bin_count[self_cell]; ++self_i) {
+            for (int di = -1; di <= 0; ++di) {
+                for (int dj = -1; dj <= 1; ++dj) {
+                    int neig_cell = (cell_row + di) * grid_size + (cell_col + dj); 
+                    for (int neig_i = 0; neig_i < bin_count[neig_cell]; ++neig_i) {
+                        apply_force_gpu(parts[part_ids[self_i + bin_ids[self_cell]]], parts[part_ids[neig_i + bin_ids[neig_cell]]]);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// CUDA compute bottom bins
+__global__ void compute_bottom_edge_gpu(particle_t* parts, int* bin_count, int* bin_ids, int* part_ids, int grid_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int cell_row = 0;
+    int cell_col = idx;
+    int self_cell = cell_row * grid_size + cell_col;
+    if ( (idx > 0) && (idx < grid_size - 1) ) {
+        for (int self_i = 0; self_i < bin_count[self_cell]; ++self_i) {
+            for (int di = 0; di <= 1; ++di) {
+                for (int dj = -1; dj <= 1; ++dj) {
+                    int neig_cell = (cell_row + di) * grid_size + (cell_col + dj); 
+                    for (int neig_i = 0; neig_i < bin_count[neig_cell]; ++neig_i) {
+                        apply_force_gpu(parts[part_ids[self_i + bin_ids[self_cell]]], parts[part_ids[neig_i + bin_ids[neig_cell]]]);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// CUDA compute corners
+__global__ void compute_corners_gpu(particle_t* parts, int* bin_count, int* bin_ids, int* part_ids, int grid_size) {
+    int idx = blockIdx.x;
+    // left-top corner
+    if (idx == 0) {
+        int cell_row = grid_size - 1;
+        int cell_col = 0;
+        int self_cell = cell_row * grid_size + cell_col;
+        for (int self_i = 0; self_i < bin_count[self_cell]; ++self_i) {
+            for (int di = -1; di <= 0; ++di) {
+                for (int dj = 0; dj <= 1; ++dj) {
+                    int neig_cell = (cell_row + di) * grid_size + (cell_col + dj); 
+                    for (int neig_i = 0; neig_i < bin_count[neig_cell]; ++neig_i) {
+                        apply_force_gpu(parts[part_ids[self_i + bin_ids[self_cell]]], parts[part_ids[neig_i + bin_ids[neig_cell]]]);
+                    }
+                }
+            }
+        }
+    }
+    // right-top corner
+    if (idx == 1) {
+        int cell_row = grid_size - 1;
+        int cell_col = grid_size - 1;
+        int self_cell = cell_row * grid_size + cell_col;
+        for (int self_i = 0; self_i < bin_count[self_cell]; ++self_i) {
+            for (int di = -1; di <= 0; ++di) {
+                for (int dj = -1; dj <= 0; ++dj) {
+                    int neig_cell = (cell_row + di) * grid_size + (cell_col + dj); 
+                    for (int neig_i = 0; neig_i < bin_count[neig_cell]; ++neig_i) {
+                        apply_force_gpu(parts[part_ids[self_i + bin_ids[self_cell]]], parts[part_ids[neig_i + bin_ids[neig_cell]]]);
+                    }
+                }
+            }
+        }
+    }
+    // left-bottom corner
+    if (idx == 2) {
+        int cell_row = 0;
+        int cell_col = 0;
+        int self_cell = cell_row * grid_size + cell_col;
+        for (int self_i = 0; self_i < bin_count[self_cell]; ++self_i) {
+            for (int di = 0; di <= 1; ++di) {
+                for (int dj = 0; dj <= 1; ++dj) {
+                    int neig_cell = (cell_row + di) * grid_size + (cell_col + dj); 
+                    for (int neig_i = 0; neig_i < bin_count[neig_cell]; ++neig_i) {
+                        apply_force_gpu(parts[part_ids[self_i + bin_ids[self_cell]]], parts[part_ids[neig_i + bin_ids[neig_cell]]]);
+                    }
+                }
+            }
+        }
+    }
+    // right-bottom corner
+    if (idx == 3) {
+        int cell_row = 0;
+        int cell_col = grid_size - 1;
+        int self_cell = cell_row * grid_size + cell_col;
+        for (int self_i = 0; self_i < bin_count[self_cell]; ++self_i) {
+            for (int di = 0; di <= 1; ++di) {
+                for (int dj = -1; dj <= 0; ++dj) {
+                    int neig_cell = (cell_row + di) * grid_size + (cell_col + dj); 
+                    for (int neig_i = 0; neig_i < bin_count[neig_cell]; ++neig_i) {
+                        apply_force_gpu(parts[part_ids[self_i + bin_ids[self_cell]]], parts[part_ids[neig_i + bin_ids[neig_cell]]]);
+                    }
+                }
+            }
+        }
+    }
+}
 
 void simulate_one_step(particle_t* parts, int num_parts, double size) {
     
@@ -130,6 +345,12 @@ void simulate_one_step(particle_t* parts, int num_parts, double size) {
     cudaMemset(d_bin_count, 0, num_bins * sizeof(int));
     cudaMemset(d_bin_ids, -1, num_bins * sizeof(int));
     cudaMemset(d_part_ids, 0, num_parts * sizeof(int));
+
+    // copy back to CPU for debug
+    
+    int *bin_count = new int[num_bins];
+    int *bin_ids = new int[num_bins];
+    int *part_ids = new int[num_parts];
 
     zero_accelerations<<<blks, NUM_THREADS>>>(parts, num_parts);
     
@@ -140,67 +361,91 @@ void simulate_one_step(particle_t* parts, int num_parts, double size) {
     // compute prefix sums
     thrust::device_ptr<int> dev_bin_count(d_bin_count);
     thrust::device_ptr<int> dev_bin_ids(d_bin_ids);
-    thrust::exclusive_scan(dev_bin_count, dev_bin_ids + num_bins, dev_bin_ids);  // Exclusive scan
+    thrust::exclusive_scan(dev_bin_count, dev_bin_count + num_bins, dev_bin_ids);  // Exclusive scan
 
     // write over all elements in bin_count to 0 
-    // cudaMemset(d_bin_count, 0, num_bins * sizeof(int));
+    cudaMemset(d_bin_count, 0, num_bins * sizeof(int));
     
     // binning
-    // bin_particles<<<blks, NUM_THREADS>>>(parts, d_bin_count, d_bin_ids, d_part_ids, num_parts, cell_size, grid_size);
+    bin_particles<<<blks, NUM_THREADS>>>(parts, d_bin_count, d_bin_ids, d_part_ids, num_parts, cell_size, grid_size);
 
-    // copy back to CPU for debug
-    int *bin_count = new int[num_bins];
-    int *bin_ids = new int[num_bins];
-    int *part_ids = new int[num_parts];
-    cudaMemcpy(bin_count, d_bin_count, num_bins * sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(bin_ids, d_bin_count, num_bins * sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(part_ids, d_bin_count, num_parts * sizeof(int), cudaMemcpyDeviceToHost);
+    if (counter % 500 == 0) {
+        
+    }
+    /*
+    if (counter % 500 == 0) {
+        cudaMemcpy(bin_count, d_bin_count, num_bins * sizeof(int), cudaMemcpyDeviceToHost);
+        cudaMemcpy(bin_ids, d_bin_ids, num_bins * sizeof(int), cudaMemcpyDeviceToHost);
+        cudaMemcpy(part_ids, d_part_ids, num_parts * sizeof(int), cudaMemcpyDeviceToHost);
 
-    std::cout << "Bin Counts: " << "\n";
-    for (int bin_row = grid_size - 1; bin_row >= 0; --bin_row) {
-        for (int bin_col = 0; bin_col < grid_size; ++bin_col) {
-            std::cout << bin_count[bin_row * grid_size + bin_col] << " ";
+        std::cout << "Bin Counts: " << "\n";
+        for (int bin_row = grid_size - 1; bin_row >= 0; --bin_row) {
+            for (int bin_col = 0; bin_col < grid_size; ++bin_col) {
+                std::cout << bin_count[bin_row * grid_size + bin_col] << " ";
+            }
+            std::cout << "\n";
         }
-        std::cout << "\n";
-    }
-    std::cout << "Bin IDs: " << "\n";
-    for (int bin_row = grid_size - 1; bin_row >= 0; --bin_row) {
-        for (int bin_col = 0; bin_col < grid_size; ++bin_col) {
-            std::cout << bin_ids[bin_row * grid_size + bin_col] << " ";
+        std::cout << "Bin IDs: " << "\n";
+        for (int bin_row = grid_size - 1; bin_row >= 0; --bin_row) {
+            for (int bin_col = 0; bin_col < grid_size; ++bin_col) {
+                std::cout << bin_ids[bin_row * grid_size + bin_col] << " ";
+            }
+            std::cout << "\n";
         }
-        std::cout << "\n";
+        std::cout << "Particle IDs: " << "\n";
+        for (int bin = 0; bin < num_bins; ++bin) {
+            std::cout << "Bin ID " << bin << ": "; 
+            for (int part_i = 0; part_i < bin_count[bin]; ++part_i) {
+                std::cout << part_ids[part_i + bin_ids[bin]] << " "; 
+            }
+            std::cout << "\n";
+        }
     }
-    std::cout << "Particle IDs: " << "\n";
-    for (int part_i = 0; part_i < num_parts; ++part_i) {
-        std::cout << part_ids[part_i] << " ";
-        std::cout << "\n";
-    }
-
+    */
+    
     // COMPUTE FORCES
+    compute_interiors_gpu<<<blks, NUM_THREADS>>>(parts, d_bin_count, d_bin_ids, d_part_ids, grid_size);
+    //compute_left_edge_gpu<<<blks, NUM_THREADS>>>(parts, d_bin_count, d_bin_ids, d_part_ids, grid_size);
+    //compute_right_edge_gpu<<<blks, NUM_THREADS>>>(parts, d_bin_count, d_bin_ids, d_part_ids, grid_size);
+    //compute_top_edge_gpu<<<blks, NUM_THREADS>>>(parts, d_bin_count, d_bin_ids, d_part_ids, grid_size);
+    //compute_bottom_edge_gpu<<<blks, NUM_THREADS>>>(parts, d_bin_count, d_bin_ids, d_part_ids, grid_size);
+    //compute_corners_gpu<<<4, 1>>>(parts, d_bin_count, d_bin_ids, d_part_ids, grid_size);
+
+    // Ensure all force computations are completed
+    cudaDeviceSynchronize();
+    /*
+    if (counter % 500 == 0) {
+        cudaMemcpy(bin_count, d_bin_count, num_bins * sizeof(int), cudaMemcpyDeviceToHost);
+        cudaMemcpy(bin_ids, d_bin_ids, num_bins * sizeof(int), cudaMemcpyDeviceToHost);
+        cudaMemcpy(part_ids, d_part_ids, num_parts * sizeof(int), cudaMemcpyDeviceToHost);
+
+        std::cout << "Bin Counts: " << "\n";
+        for (int bin_row = grid_size - 1; bin_row >= 0; --bin_row) {
+            for (int bin_col = 0; bin_col < grid_size; ++bin_col) {
+                std::cout << bin_count[bin_row * grid_size + bin_col] << " ";
+            }
+            std::cout << "\n";
+        }
+        std::cout << "Bin IDs: " << "\n";
+        for (int bin_row = grid_size - 1; bin_row >= 0; --bin_row) {
+            for (int bin_col = 0; bin_col < grid_size; ++bin_col) {
+                std::cout << bin_ids[bin_row * grid_size + bin_col] << " ";
+            }
+            std::cout << "\n";
+        }
+        std::cout << "Particle IDs: " << "\n";
+        for (int bin = 0; bin < num_bins; ++bin) {
+            std::cout << "Bin ID " << bin << ": "; 
+            for (int part_i = 0; part_i < bin_count[bin]; ++part_i) {
+                std::cout << part_ids[part_i + bin_ids[bin]] << " "; 
+            }
+            std::cout << "\n";
+        }
+    }
+    */
     
-    // interiors
-
-    // left edge 
-
-    // right edge
-
-    // top edge
-
-    // bottom edge
-
-    // left-top corner
-
-    // right-top corner
-
-    // left-bottom corner
-
-    // right-bottom corner 
-
     // MOVE PARTICLES
-    
-    // Compute forces
-    //compute_forces_gpu<<<blks, NUM_THREADS>>>(parts, num_parts);
+    move_gpu<<<blks, NUM_THREADS>>>(parts, num_parts, size);
 
-    // Move particles
-    //move_gpu<<<blks, NUM_THREADS>>>(parts, num_parts, size);
+    counter += 1; 
 }
