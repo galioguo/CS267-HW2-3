@@ -32,8 +32,6 @@ __device__ void apply_force_gpu(particle_t& particle, particle_t& neighbor) {
     double coef = (1 - cutoff / r) / r2 / mass;
     particle.ax += coef * dx;
     particle.ay += coef * dy;
-    //atomicAdd(&(particle.ax), coef * dx);
-    //atomicAdd(&(particle.ay), coef * dy);
 }
 
 __global__ void move_gpu(particle_t* particles, int num_parts, double size) {
@@ -138,7 +136,6 @@ __global__ void compute_interiors_gpu(particle_t* parts, int* bin_count, int* bi
 // CUDA compute left bins
 __global__ void compute_left_edge_gpu(particle_t* parts, int* bin_count, int* bin_ids, int* part_ids, int grid_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < grid_size) {
     int cell_row = idx;
     int cell_col = 0; //
     int self_cell = cell_row * grid_size + cell_col; // bin index
@@ -154,13 +151,11 @@ __global__ void compute_left_edge_gpu(particle_t* parts, int* bin_count, int* bi
             }
         }
     }
-    }
 }
 
 // CUDA compute right bins
 __global__ void compute_right_edge_gpu(particle_t* parts, int* bin_count, int* bin_ids, int* part_ids, int grid_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < grid_size) {
     int cell_row = idx;
     int cell_col = grid_size - 1;
     int self_cell = cell_row * grid_size + cell_col;
@@ -176,13 +171,11 @@ __global__ void compute_right_edge_gpu(particle_t* parts, int* bin_count, int* b
             }
         }
     }
-    }
 }
 
 // CUDA compute top bins
 __global__ void compute_top_edge_gpu(particle_t* parts, int* bin_count, int* bin_ids, int* part_ids, int grid_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < grid_size) {
     int cell_row = grid_size - 1;
     int cell_col = idx;
     int self_cell = cell_row * grid_size + cell_col;
@@ -198,13 +191,11 @@ __global__ void compute_top_edge_gpu(particle_t* parts, int* bin_count, int* bin
             }
         }
     }
-    }
 }
 
 // CUDA compute bottom bins
 __global__ void compute_bottom_edge_gpu(particle_t* parts, int* bin_count, int* bin_ids, int* part_ids, int grid_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < grid_size) {
     int cell_row = 0;
     int cell_col = idx;
     int self_cell = cell_row * grid_size + cell_col;
@@ -219,7 +210,6 @@ __global__ void compute_bottom_edge_gpu(particle_t* parts, int* bin_count, int* 
                 }
             }
         }
-    }
     }
 }
 
